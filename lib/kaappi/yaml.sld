@@ -1,0 +1,123 @@
+(define-library (kaappi yaml)
+  (import (scheme base) (scheme write)
+          (kaappi yaml flow)
+          (kaappi yaml parse))
+  (export yaml-read yaml-read-string
+          yaml-write yaml-write-string
+          yaml-null yaml-null?
+          yaml-ref yaml-ref*)
+  (begin
+
+    (define (yaml-read-string str) (yaml-parse-string str))
+
+    (define (yaml-read . args)
+      (let* ((port (if (pair? args) (car args) (current-input-port)))
+             (str (let loop ((acc '()))
+                    (let ((ch (read-char port)))
+                      (if (eof-object? ch)
+                          (list->string (reverse acc))
+                          (loop (cons ch acc)))))))
+        (yaml-parse-string str)))
+
+    (define (yaml-ref table key)
+      (if (pair? table)
+          (let ((p (assoc key table))) (if p (cdr p) #f))
+          #f))
+
+    (define (yaml-ref* table . keys)
+      (let loop ((t table) (ks keys))
+        (if (null? ks) t
+            (let ((v (yaml-ref t (car ks))))
+              (if v (loop v (cdr ks)) #f)))))
+
+    (define (yaml-write-string value)
+      (let ((port (open-output-string)))
+        (write-node value 0 port) (newline port) (get-output-string port)))
+
+    (define (yaml-write value . args)
+      (let ((port (if (pair? args) (car args) (current-output-port))))
+        (write-node value 0 port) (newline port)))
+
+    (define (write-node value indent port)
+      (cond
+        ((yaml-null? value) (write-string "null" port))
+        ((boolean? value) (write-string (if value "true" "false") port))
+        ((and (number? value) (exact? value))
+         (write-string (number->string value) port))
+        ((number? value)
+         (cond
+           ((infinite? value) (write-string (if (positive? value) ".inf" "-.inf") port))
+           ((nan? value) (write-string ".nan" port))
+           (else (write-string (number->string value) port))))
+        ((string? value) (write-yaml-string value port))
+        ((and (list? value) (null? value)) (write-string "[]" port))
+        ((and (list? value) (pair? value) (pair? (car value)) (string? (caar value)))
+         (write-yaml-mapping value indent port))
+        ((list? value) (write-yaml-sequence value indent port))
+        (else (write-string "\"" port) (write value port) (write-string "\"" port))))
+
+    (define (write-yaml-mapping pairs indent port)
+      (let loop ((ps pairs) (first? #t))
+        (when (pair? ps)
+          (unless first? (newline port) (write-indent indent port))
+          (write-yaml-key (caar ps) port)
+          (write-string ":" port)
+          (let ((val (cdar ps)))
+            (if (and (list? val) (pair? val)
+                     (or (and (pair? (car val)) (string? (caar val)))
+                         (not (pair? (car val)))))
+                (begin (newline port) (write-indent (+ indent 2) port)
+                       (write-node val (+ indent 2) port))
+                (begin (write-string " " port)
+                       (write-node val (+ indent 2) port))))
+          (loop (cdr ps) #f))))
+
+    (define (write-yaml-sequence items indent port)
+      (let loop ((is items) (first? #t))
+        (when (pair? is)
+          (unless first? (newline port) (write-indent indent port))
+          (write-string "- " port)
+          (write-node (car is) (+ indent 2) port)
+          (loop (cdr is) #f))))
+
+    (define (write-yaml-key key port)
+      (if (needs-quoting? key)
+          (begin (write-string "\"" port) (write-escaped key port)
+                 (write-string "\"" port))
+          (write-string key port)))
+
+    (define (write-yaml-string s port)
+      (if (or (string=? s "") (needs-quoting? s)
+              (string=? s "true") (string=? s "false")
+              (string=? s "null") (string=? s "~")
+              (string->number s))
+          (begin (write-string "\"" port) (write-escaped s port)
+                 (write-string "\"" port))
+          (write-string s port)))
+
+    (define (needs-quoting? s)
+      (let loop ((i 0))
+        (if (= i (string-length s)) #f
+            (let ((ch (string-ref s i)))
+              (or (char=? ch #\:) (char=? ch #\#) (char=? ch #\[)
+                  (char=? ch #\]) (char=? ch #\{) (char=? ch #\})
+                  (char=? ch #\,) (char=? ch #\") (char=? ch #\')
+                  (char=? ch #\newline) (char=? ch #\tab) (char=? ch #\\)
+                  (loop (+ i 1)))))))
+
+    (define (write-escaped s port)
+      (let loop ((i 0))
+        (when (< i (string-length s))
+          (let ((ch (string-ref s i)))
+            (cond
+              ((char=? ch #\\) (write-string "\\\\" port))
+              ((char=? ch #\") (write-string "\\\"" port))
+              ((char=? ch #\newline) (write-string "\\n" port))
+              ((char=? ch #\tab) (write-string "\\t" port))
+              ((char=? ch #\return) (write-string "\\r" port))
+              (else (write-char ch port)))
+            (loop (+ i 1))))))
+
+    (define (write-indent n port)
+      (let loop ((i 0))
+        (when (< i n) (write-char #\space port) (loop (+ i 1)))))))
